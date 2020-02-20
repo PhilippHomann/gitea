@@ -179,7 +179,7 @@ It can be used for backup and capture Gitea server image to send to maintainer`,
 		cli.StringFlag{
 			Name:  "file, f",
 			Value: fmt.Sprintf("gitea-dump-%d.zip", time.Now().Unix()),
-			Usage: "Name of the dump file which will be created.",
+			Usage: "Name of the dump file which will be created. Supply '-' for stdout.",
 		},
 		cli.BoolFlag{
 			Name:  "verbose, V",
@@ -215,6 +215,12 @@ func fatal(format string, args ...interface{}) {
 }
 
 func runDump(ctx *cli.Context) error {
+	var file *os.File
+	fileName := ctx.String("file")
+	if fileName == "-" {
+		file = os.Stdout
+		log.DelLogger("console")
+	}
 	setting.NewContext()
 	setting.NewServices() // cannot access session settings otherwise
 
@@ -240,14 +246,12 @@ func runDump(ctx *cli.Context) error {
 
 	dbDump := path.Join(tmpWorkDir, "gitea-db.sql")
 
-	fileName := ctx.String("file")
 	log.Info("Packing dump files...")
-	file, err := os.Create(fileName)
-	if err != nil {
-		fatal("Unable to open %s: %s", fileName, err)
-	}
-	if err != nil {
-		fatal("Failed to create %s: %v", fileName, err)
+	if file == nil {
+		file, err = os.Create(fileName)
+		if err != nil {
+			fatal("Unable to open %s: %s", fileName, err)
+		}
 	}
 	defer file.Close()
 
