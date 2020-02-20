@@ -6,11 +6,14 @@
 package cmd
 
 import (
+	"archive/tar"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"code.gitea.io/gitea/models"
@@ -21,6 +24,149 @@ import (
 	"github.com/unknwon/com"
 	"github.com/urfave/cli"
 )
+
+type outWriter interface {
+	AddFile(filePath string, absPath string) error
+	AddDir(dirPath string, absPath string) error
+	AddEmptyDir(dirPath string) bool
+	Close() error
+}
+
+type tarWriter struct {
+	Tar     *tar.Writer
+	Verbose bool
+}
+
+func newtarWriter(writer io.Writer, verbose bool) *tarWriter {
+	w := new(tarWriter)
+	w.Verbose = verbose
+	w.Tar = tar.NewWriter(writer)
+
+	return w
+}
+
+func (w *tarWriter) AddFile(filePath string, absPath string) error {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("Unable to open %s: %s", absPath, err)
+	}
+	defer f.Close()
+
+	stat, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("Unable to get stat of %s: %s", absPath, err)
+	}
+
+	header := &tar.Header{
+		Name:    filePath,
+		Size:    stat.Size(),
+		Mode:    int64(stat.Mode()),
+		ModTime: stat.ModTime(),
+	}
+
+	if w.Verbose {
+		fmt.Fprintf(os.Stderr, "Adding file %s\n", filePath)
+	}
+	err = w.Tar.WriteHeader(header)
+	if err != nil {
+		return fmt.Errorf("Writing header for file %s failed: %s", absPath, err)
+	}
+
+	_, err = io.Copy(w.Tar, f)
+	if err != nil {
+		return fmt.Errorf("Writing file '%s' to tarball failed: %s", absPath, err)
+	}
+
+	return nil
+}
+
+func (w *tarWriter) AddDir(dirPath string, absPath string) error {
+	if w.Verbose {
+		fmt.Fprintf(os.Stderr, "Adding dir  %s\n", dirPath)
+	}
+
+	dir, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("Could not open directory %s: %s", absPath, err)
+	}
+	files, err := dir.Readdir(0)
+	if err != nil {
+		return fmt.Errorf("Unable to list files in %s: %s", absPath, err)
+	}
+
+	for _, fileInfo := range files {
+		if fileInfo.IsDir() {
+			err = w.AddDir(filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
+		} else {
+			err = w.AddFile(filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *tarWriter) AddEmptyDir(dirPath string) bool {
+	return true
+}
+
+func (w *tarWriter) Close() error {
+	return w.Tar.Close()
+}
+
+type zipWriter struct {
+	Zip *zip.ZipArchive
+}
+
+func newzipWriter(writer io.Writer) *zipWriter {
+	w := new(zipWriter)
+	z := zip.New(writer)
+	w.Zip = z
+
+	return w
+}
+
+func (w *zipWriter) AddFile(filePath string, absPath string) error {
+	return w.Zip.AddFile(filePath, absPath)
+}
+
+func (w *zipWriter) AddDir(dirPath string, absPath string) error {
+	return w.Zip.AddDir(dirPath, absPath)
+}
+
+func (w *zipWriter) AddEmptyDir(dirPath string) bool {
+	return w.Zip.AddEmptyDir(dirPath)
+}
+
+func (w *zipWriter) Close() error {
+	return w.Zip.Close()
+}
+
+type outputType struct {
+	Enum     []string
+	Default  string
+	selected string
+}
+
+func (e *outputType) Set(value string) error {
+	for _, enum := range e.Enum {
+		if enum == value {
+			e.selected = value
+			return nil
+		}
+	}
+
+	return fmt.Errorf("allowed values are %s", strings.Join(e.Enum, ", "))
+}
+
+func (e outputType) String() string {
+	if e.selected == "" {
+		return e.Default
+	}
+	return e.selected
+}
 
 // CmdDump represents the available dump sub-command.
 var CmdDump = cli.Command{
@@ -51,6 +197,14 @@ It can be used for backup and capture Gitea server image to send to maintainer`,
 		cli.BoolFlag{
 			Name:  "skip-repository, R",
 			Usage: "Skip the repository dumping",
+		},
+		cli.GenericFlag{
+			Name: "type",
+			Value: &outputType{
+				Enum:    []string{"zip", "tar"},
+				Default: "zip",
+			},
+			Usage: "Dump output format. One of zip or tar.",
 		},
 	},
 }
@@ -88,12 +242,26 @@ func runDump(ctx *cli.Context) error {
 
 	fileName := ctx.String("file")
 	log.Info("Packing dump files...")
-	z, err := zip.Create(fileName)
+	file, err := os.Create(fileName)
+	if err != nil {
+		fatal("Unable to open %s: %s", fileName, err)
+	}
 	if err != nil {
 		fatal("Failed to create %s: %v", fileName, err)
 	}
+	defer file.Close()
 
-	zip.Verbose = ctx.Bool("verbose")
+	var writer outWriter
+	outType := ctx.String("type")
+	if outType == "tar" {
+		writer = newtarWriter(file, ctx.Bool("verbose"))
+	} else if outType == "zip" {
+		if fileName != "-" {
+			zip.Verbose = ctx.Bool("verbose")
+		}
+		writer = newzipWriter(file)
+	}
+	defer writer.Close()
 
 	if ctx.IsSet("skip-repository") {
 		log.Info("Skip dumping local repositories")
@@ -103,7 +271,7 @@ func runDump(ctx *cli.Context) error {
 		if err := zip.PackTo(setting.RepoRootPath, reposDump, true); err != nil {
 			fatal("Failed to dump local repositories: %v", err)
 		}
-		if err := z.AddFile("gitea-repo.zip", reposDump); err != nil {
+		if err := writer.AddFile("gitea-repo.zip", reposDump); err != nil {
 			fatal("Failed to include gitea-repo.zip: %v", err)
 		}
 	}
@@ -119,20 +287,20 @@ func runDump(ctx *cli.Context) error {
 		fatal("Failed to dump database: %v", err)
 	}
 
-	if err := z.AddFile("gitea-db.sql", dbDump); err != nil {
+	if err := writer.AddFile("gitea-db.sql", dbDump); err != nil {
 		fatal("Failed to include gitea-db.sql: %v", err)
 	}
 
 	if len(setting.CustomConf) > 0 {
 		log.Info("Adding custom configuration file from %s", setting.CustomConf)
-		if err := z.AddFile("app.ini", setting.CustomConf); err != nil {
+		if err := writer.AddFile("app.ini", setting.CustomConf); err != nil {
 			fatal("Failed to include specified app.ini: %v", err)
 		}
 	}
 
 	customDir, err := os.Stat(setting.CustomPath)
 	if err == nil && customDir.IsDir() {
-		if err := z.AddDir("custom", setting.CustomPath); err != nil {
+		if err := writer.AddDir("custom", setting.CustomPath); err != nil {
 			fatal("Failed to include custom: %v", err)
 		}
 	} else {
@@ -146,24 +314,26 @@ func runDump(ctx *cli.Context) error {
 		if setting.SessionConfig.Provider == "file" {
 			sessionAbsPath = setting.SessionConfig.ProviderConfig
 		}
-		if err := zipAddDirectoryExclude(z, "data", setting.AppDataPath, sessionAbsPath); err != nil {
+		if err := AddDirExclude(writer, "data", setting.AppDataPath, sessionAbsPath); err != nil {
 			fatal("Failed to include data directory: %v", err)
 		}
 	}
 
 	if com.IsExist(setting.LogRootPath) {
-		if err := z.AddDir("log", setting.LogRootPath); err != nil {
+		if err := writer.AddDir("log", setting.LogRootPath); err != nil {
 			fatal("Failed to include log: %v", err)
 		}
 	}
 
-	if err = z.Close(); err != nil {
-		_ = os.Remove(fileName)
-		fatal("Failed to save %s: %v", fileName, err)
-	}
+	if fileName != "-" {
+		if err = writer.Close(); err != nil {
+			_ = os.Remove(fileName)
+			fatal("Failed to save %s: %v", fileName, err)
+		}
 
-	if err := os.Chmod(fileName, 0600); err != nil {
-		log.Info("Can't change file access permissions mask to 0600: %v", err)
+		if err := os.Chmod(fileName, 0600); err != nil {
+			log.Info("Can't change file access permissions mask to 0600: %v", err)
+		}
 	}
 
 	log.Info("Removing tmp work dir: %s", tmpWorkDir)
@@ -176,8 +346,8 @@ func runDump(ctx *cli.Context) error {
 	return nil
 }
 
-// zipAddDirectoryExclude zips absPath to specified zipPath inside z excluding excludeAbsPath
-func zipAddDirectoryExclude(zip *zip.ZipArchive, zipPath, absPath string, excludeAbsPath string) error {
+// AddDirExclude zips absPath to specified insidePath inside writer excluding excludeAbsPath
+func AddDirExclude(writer outWriter, insidePath, absPath string, excludeAbsPath string) error {
 	absPath, err := filepath.Abs(absPath)
 	if err != nil {
 		return err
@@ -188,7 +358,7 @@ func zipAddDirectoryExclude(zip *zip.ZipArchive, zipPath, absPath string, exclud
 	}
 	defer dir.Close()
 
-	zip.AddEmptyDir(zipPath)
+	writer.AddEmptyDir(insidePath)
 
 	files, err := dir.Readdir(0)
 	if err != nil {
@@ -196,16 +366,16 @@ func zipAddDirectoryExclude(zip *zip.ZipArchive, zipPath, absPath string, exclud
 	}
 	for _, file := range files {
 		currentAbsPath := path.Join(absPath, file.Name())
-		currentZipPath := path.Join(zipPath, file.Name())
+		currentInsidePath := path.Join(insidePath, file.Name())
 		if file.IsDir() {
 			if currentAbsPath != excludeAbsPath {
-				if err = zipAddDirectoryExclude(zip, currentZipPath, currentAbsPath, excludeAbsPath); err != nil {
+				if err = AddDirExclude(writer, currentInsidePath, currentAbsPath, excludeAbsPath); err != nil {
 					return err
 				}
 			}
 
 		} else {
-			if err = zip.AddFile(currentZipPath, currentAbsPath); err != nil {
+			if err = writer.AddFile(currentInsidePath, currentAbsPath); err != nil {
 				return err
 			}
 		}
