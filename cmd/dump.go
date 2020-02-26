@@ -6,13 +6,18 @@
 package cmd
 
 import (
-	"archive/tar"
+	// "archive/tar"
+
+	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
+	"path/filepath"
+
+	// "io/ioutil"
 	"os"
 	"path"
-	"path/filepath"
+
+	// "path/filepath"
 	"strings"
 	"time"
 
@@ -20,71 +25,154 @@ import (
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/setting"
 
+	"gitea.com/macaron/session"
+	archiver "github.com/mholt/archiver/v3"
 	"github.com/unknwon/cae/zip"
 	"github.com/unknwon/com"
 	"github.com/urfave/cli"
 )
 
-type outWriter interface {
-	AddFile(filePath string, absPath string) error
-	AddDir(dirPath string, absPath string) error
-	AddEmptyDir(dirPath string) bool
-	Close() error
-}
+// type outWriter interface {
+// 	addFile(w, filePath string, absPath string) error
+// 	addDir(w, dirPath string, absPath string) error
+// 	AddEmptyDir(dirPath string) bool
+// 	Close() error
+// }
 
-type tarWriter struct {
-	Tar     *tar.Writer
-	Verbose bool
-}
+// type tarWriter struct {
+// 	Tar     *tar.Writer
+// 	Verbose bool
+// }
 
-func newtarWriter(writer io.Writer, verbose bool) *tarWriter {
-	w := new(tarWriter)
-	w.Verbose = verbose
-	w.Tar = tar.NewWriter(writer)
+// func newtarWriter(writer io.Writer, verbose bool) *tarWriter {
+// 	w := new(tarWriter)
+// 	w.Verbose = verbose
+// 	w.Tar = tar.NewWriter(writer)
 
-	return w
-}
+// 	return w
+// }
 
-func (w *tarWriter) AddFile(filePath string, absPath string) error {
-	f, err := os.Open(absPath)
+// func (w *tarWriter) addFile(w, filePath string, absPath string) error {
+// 	f, err := os.Open(absPath)
+// 	if err != nil {
+// 		return fmt.Errorf("Unable to open %s: %s", absPath, err)
+// 	}
+// 	defer f.Close()
+
+// 	stat, err := os.Stat(absPath)
+// 	if err != nil {
+// 		return fmt.Errorf("Unable to get stat of %s: %s", absPath, err)
+// 	}
+
+// 	header := &tar.Header{
+// 		Name:    filePath,
+// 		Size:    stat.Size(),
+// 		Mode:    int64(stat.Mode()),
+// 		ModTime: stat.ModTime(),
+// 	}
+
+// 	if w.Verbose {
+// 		fmt.Fprintf(os.Stderr, "Adding file %s\n", filePath)
+// 	}
+// 	err = w.Tar.WriteHeader(header)
+// 	if err != nil {
+// 		return fmt.Errorf("Writing header for file %s failed: %s", absPath, err)
+// 	}
+
+// 	_, err = io.Copy(w.Tar, f)
+// 	if err != nil {
+// 		return fmt.Errorf("Writing file '%s' to tarball failed: %s", absPath, err)
+// 	}
+
+// 	return nil
+// }
+
+// func (w *tarWriter) addDir(w, dirPath string, absPath string) error {
+// 	if w.Verbose {
+// 		fmt.Fprintf(os.Stderr, "Adding dir  %s\n", dirPath)
+// 	}
+
+// 	dir, err := os.Open(absPath)
+// 	if err != nil {
+// 		return fmt.Errorf("Could not open directory %s: %s", absPath, err)
+// 	}
+// 	files, err := dir.Readdir(0)
+// 	if err != nil {
+// 		return fmt.Errorf("Unable to list files in %s: %s", absPath, err)
+// 	}
+
+// 	for _, fileInfo := range files {
+// 		if fileInfo.IsDir() {
+// 			err = w.addDir(w, filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
+// 		} else {
+// 			err = w.addFile(w, filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
+// 		}
+// 		if err != nil {
+// 			return err
+// 		}
+// 	}
+
+// 	return nil
+// }
+
+// func (w *tarWriter) AddEmptyDir(dirPath string) bool {
+// 	return true
+// }
+
+// func (w *tarWriter) Close() error {
+// 	return w.Tar.Close()
+// }
+
+// type zipWriter struct {
+// 	Zip *zip.ZipArchive
+// }
+
+// func newzipWriter(writer io.Writer) *zipWriter {
+// 	w := new(zipWriter)
+// 	z := zip.New(writer)
+// 	w.Zip = z
+
+// 	return w
+// }
+
+// func (w *zipWriter) addFile(w, filePath string, absPath string) error {
+// 	return w.Zip.addFile(w, filePath, absPath)
+// }
+
+// func (w *zipWriter) addDir(w, dirPath string, absPath string) error {
+// 	return w.Zip.addDir(w, dirPath, absPath)
+// }
+
+// func (w *zipWriter) AddEmptyDir(dirPath string) bool {
+// 	return w.Zip.AddEmptyDir(dirPath)
+// }
+
+// func (w *zipWriter) Close() error {
+// 	return w.Zip.Close()
+// }
+
+func addFile(w archiver.Writer, filePath string, absPath string) error {
+	file, err := os.Open(absPath)
 	if err != nil {
-		return fmt.Errorf("Unable to open %s: %s", absPath, err)
+		return err
 	}
-	defer f.Close()
-
-	stat, err := os.Stat(absPath)
+	defer file.Close()
+	fileInfo, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("Unable to get stat of %s: %s", absPath, err)
+		return err
 	}
-
-	header := &tar.Header{
-		Name:    filePath,
-		Size:    stat.Size(),
-		Mode:    int64(stat.Mode()),
-		ModTime: stat.ModTime(),
-	}
-
-	if w.Verbose {
-		fmt.Fprintf(os.Stderr, "Adding file %s\n", filePath)
-	}
-	err = w.Tar.WriteHeader(header)
-	if err != nil {
-		return fmt.Errorf("Writing header for file %s failed: %s", absPath, err)
-	}
-
-	_, err = io.Copy(w.Tar, f)
-	if err != nil {
-		return fmt.Errorf("Writing file '%s' to tarball failed: %s", absPath, err)
-	}
+	err = w.Write(archiver.File{
+		FileInfo: archiver.FileInfo{
+			FileInfo:   fileInfo,
+			CustomName: filePath,
+		},
+		ReadCloser: file, // does not have to be an actual file
+	})
 
 	return nil
 }
 
-func (w *tarWriter) AddDir(dirPath string, absPath string) error {
-	if w.Verbose {
-		fmt.Fprintf(os.Stderr, "Adding dir  %s\n", dirPath)
-	}
-
+func addDir(w archiver.Writer, dirPath string, absPath string) error {
 	dir, err := os.Open(absPath)
 	if err != nil {
 		return fmt.Errorf("Could not open directory %s: %s", absPath, err)
@@ -96,52 +184,15 @@ func (w *tarWriter) AddDir(dirPath string, absPath string) error {
 
 	for _, fileInfo := range files {
 		if fileInfo.IsDir() {
-			err = w.AddDir(filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
+			err = addDir(w, filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
 		} else {
-			err = w.AddFile(filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
+			err = addFile(w, filepath.Join(dirPath, fileInfo.Name()), filepath.Join(absPath, fileInfo.Name()))
 		}
 		if err != nil {
 			return err
 		}
 	}
-
-	return nil
-}
-
-func (w *tarWriter) AddEmptyDir(dirPath string) bool {
-	return true
-}
-
-func (w *tarWriter) Close() error {
-	return w.Tar.Close()
-}
-
-type zipWriter struct {
-	Zip *zip.ZipArchive
-}
-
-func newzipWriter(writer io.Writer) *zipWriter {
-	w := new(zipWriter)
-	z := zip.New(writer)
-	w.Zip = z
-
-	return w
-}
-
-func (w *zipWriter) AddFile(filePath string, absPath string) error {
-	return w.Zip.AddFile(filePath, absPath)
-}
-
-func (w *zipWriter) AddDir(dirPath string, absPath string) error {
-	return w.Zip.AddDir(dirPath, absPath)
-}
-
-func (w *zipWriter) AddEmptyDir(dirPath string) bool {
-	return w.Zip.AddEmptyDir(dirPath)
-}
-
-func (w *zipWriter) Close() error {
-	return w.Zip.Close()
+	return addFile(w, dirPath, absPath)
 }
 
 type outputType struct {
@@ -255,17 +306,22 @@ func runDump(ctx *cli.Context) error {
 	}
 	defer file.Close()
 
-	var writer outWriter
-	outType := ctx.String("type")
-	if outType == "tar" {
-		writer = newtarWriter(file, ctx.Bool("verbose"))
-	} else if outType == "zip" {
-		if fileName != "-" {
-			zip.Verbose = ctx.Bool("verbose")
-		}
-		writer = newzipWriter(file)
-	}
-	defer writer.Close()
+	// var writer outWriter
+	// outType := ctx.String("type")
+	// if outType == "tar" {
+	// 	writer = newtarWriter(file, ctx.Bool("verbose"))
+	// } else if outType == "zip" {
+	// 	if fileName != "-" {
+	// 		zip.Verbose = ctx.Bool("verbose")
+	// 	}
+	// 	writer = newzipWriter(file)
+	// }
+	// defer writer.Close()
+
+	iface, err := archiver.ByExtension(fileName)
+	w, _ := iface.(archiver.Writer)
+	w.Create(file)
+	defer w.Close()
 
 	if ctx.IsSet("skip-repository") {
 		log.Info("Skip dumping local repositories")
@@ -275,7 +331,7 @@ func runDump(ctx *cli.Context) error {
 		if err := zip.PackTo(setting.RepoRootPath, reposDump, true); err != nil {
 			fatal("Failed to dump local repositories: %v", err)
 		}
-		if err := writer.AddFile("gitea-repo.zip", reposDump); err != nil {
+		if err := addFile(w, "gitea-repo.zip", reposDump); err != nil {
 			fatal("Failed to include gitea-repo.zip: %v", err)
 		}
 	}
@@ -291,20 +347,20 @@ func runDump(ctx *cli.Context) error {
 		fatal("Failed to dump database: %v", err)
 	}
 
-	if err := writer.AddFile("gitea-db.sql", dbDump); err != nil {
+	if err := addFile(w, "gitea-db.sql", dbDump); err != nil {
 		fatal("Failed to include gitea-db.sql: %v", err)
 	}
 
 	if len(setting.CustomConf) > 0 {
 		log.Info("Adding custom configuration file from %s", setting.CustomConf)
-		if err := writer.AddFile("app.ini", setting.CustomConf); err != nil {
+		if err := addFile(w, "app.ini", setting.CustomConf); err != nil {
 			fatal("Failed to include specified app.ini: %v", err)
 		}
 	}
 
 	customDir, err := os.Stat(setting.CustomPath)
 	if err == nil && customDir.IsDir() {
-		if err := writer.AddDir("custom", setting.CustomPath); err != nil {
+		if err := addDir(w, "custom", setting.CustomPath); err != nil {
 			fatal("Failed to include custom: %v", err)
 		}
 	} else {
@@ -315,22 +371,26 @@ func runDump(ctx *cli.Context) error {
 		log.Info("Packing data directory...%s", setting.AppDataPath)
 
 		var sessionAbsPath string
-		if setting.SessionConfig.Provider == "file" {
-			sessionAbsPath = setting.SessionConfig.ProviderConfig
+		if setting.Cfg.Section("session").Key("PROVIDER").Value() == "file" {
+			var opts session.Options
+			if err = json.Unmarshal([]byte(setting.SessionConfig.ProviderConfig), &opts); err != nil {
+				return err
+			}
+			sessionAbsPath = opts.ProviderConfig
 		}
-		if err := AddDirExclude(writer, "data", setting.AppDataPath, sessionAbsPath); err != nil {
+		if err := addDirExclude(w, "data", setting.AppDataPath, sessionAbsPath); err != nil {
 			fatal("Failed to include data directory: %v", err)
 		}
 	}
 
 	if com.IsExist(setting.LogRootPath) {
-		if err := writer.AddDir("log", setting.LogRootPath); err != nil {
+		if err := addDir(w, "log", setting.LogRootPath); err != nil {
 			fatal("Failed to include log: %v", err)
 		}
 	}
 
 	if fileName != "-" {
-		if err = writer.Close(); err != nil {
+		if err = w.Close(); err != nil {
 			_ = os.Remove(fileName)
 			fatal("Failed to save %s: %v", fileName, err)
 		}
@@ -350,8 +410,8 @@ func runDump(ctx *cli.Context) error {
 	return nil
 }
 
-// AddDirExclude zips absPath to specified insidePath inside writer excluding excludeAbsPath
-func AddDirExclude(writer outWriter, insidePath, absPath string, excludeAbsPath string) error {
+// addDirExclude zips absPath to specified insidePath inside writer excluding excludeAbsPath
+func addDirExclude(w archiver.Writer, insidePath, absPath string, excludeAbsPath string) error {
 	absPath, err := filepath.Abs(absPath)
 	if err != nil {
 		return err
@@ -362,8 +422,6 @@ func AddDirExclude(writer outWriter, insidePath, absPath string, excludeAbsPath 
 	}
 	defer dir.Close()
 
-	writer.AddEmptyDir(insidePath)
-
 	files, err := dir.Readdir(0)
 	if err != nil {
 		return err
@@ -373,13 +431,13 @@ func AddDirExclude(writer outWriter, insidePath, absPath string, excludeAbsPath 
 		currentInsidePath := path.Join(insidePath, file.Name())
 		if file.IsDir() {
 			if currentAbsPath != excludeAbsPath {
-				if err = AddDirExclude(writer, currentInsidePath, currentAbsPath, excludeAbsPath); err != nil {
+				if err = addDirExclude(w, currentInsidePath, currentAbsPath, excludeAbsPath); err != nil {
 					return err
 				}
 			}
 
 		} else {
-			if err = writer.AddFile(currentInsidePath, currentAbsPath); err != nil {
+			if err = addFile(w, currentInsidePath, currentAbsPath); err != nil {
 				return err
 			}
 		}
