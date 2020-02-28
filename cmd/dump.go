@@ -141,6 +141,10 @@ It can be used for backup and capture Gitea server image to send to maintainer`,
 			Name:  "skip-repository, R",
 			Usage: "Skip the repository dumping",
 		},
+		cli.BoolFlag{
+			Name:  "skip-log",
+			Usage: "Skip the log dumping",
+		},
 		cli.GenericFlag{
 			Name:  "type",
 			Value: outputTypeEnum,
@@ -261,7 +265,7 @@ func runDump(ctx *cli.Context) error {
 		}
 	}
 
-	if com.IsExist(setting.LogRootPath) {
+	if com.IsExist(setting.LogRootPath) && !ctx.Bool("skip-log") {
 		if err := addRecursive(w, "log", setting.LogRootPath, verbose); err != nil {
 			fatal("Failed to include log: %v", err)
 		}
